@@ -110,11 +110,11 @@ DROP SERVER IF EXISTS shard2_server CASCADE;
 
 CREATE SERVER shard1_server
     FOREIGN DATA WRAPPER postgres_fdw
-    OPTIONS (host 'postgres-shard1', port '5432', dbname 'sales_shard1');
+    OPTIONS (host 'postgres-shard1', port '5432', dbname 'sales');
 
 CREATE SERVER shard2_server
     FOREIGN DATA WRAPPER postgres_fdw
-    OPTIONS (host 'postgres-shard2', port '5432', dbname 'sales_shard2');
+    OPTIONS (host 'postgres-shard2', port '5432', dbname 'sales');
 
 CREATE USER MAPPING FOR postgres
     SERVER shard1_server

@@ -1,7 +1,8 @@
 services:
 
   # ==========================================
-  # SHARD 1 NODE (Service Docker Shard Terpisah - Port 5435)
+  # SHARD 1 PRIMARY (Node Fisik Shard 1 - Port 5435)
+  # Menampung: Reference Tables & Data Transaksi Periode Lama
   # ==========================================
   postgres-shard1:
     image: postgres:17
@@ -10,70 +11,14 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres123
-      POSTGRES_DB: sales_shard1
+      POSTGRES_DB: sales
     ports:
       - "5435:5432"
     volumes:
       - shard1_data:/var/lib/postgresql/data
-      - ./shards/shard1_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - pg-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d sales_shard1"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-
-  # ==========================================
-  # SHARD 2 NODE (Service Docker Shard Terpisah - Port 5436)
-  # ==========================================
-  postgres-shard2:
-    image: postgres:17
-    container_name: postgres-shard2
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres123
-      POSTGRES_DB: sales_shard2
-    ports:
-      - "5436:5432"
-    volumes:
-      - shard2_data:/var/lib/postgresql/data
-      - ./shards/shard2_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - pg-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d sales_shard2"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-
-  # ==========================================
-  # MASTER / COORDINATOR / PRIMARY NODE (Port 5432)
-  # ==========================================
-  postgres-primary:
-    image: postgres:17
-    container_name: postgres-primary
-    restart: unless-stopped
-    depends_on:
-      postgres-shard1:
-        condition: service_healthy
-      postgres-shard2:
-        condition: service_healthy
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres123
-      POSTGRES_DB: sales
-      REPLICATION_USER: replicator
-      REPLICATION_PASSWORD: replica123
-    ports:
-      - "5432:5432"
-    volumes:
-      - primary_data:/var/lib/postgresql/data
-      - ./primary/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
-      - ./db.sql:/docker-entrypoint-initdb.d/02-db.sql:ro
+      - ./shards/shard1_init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./shards/reference_tables.sql:/docker-entrypoint-initdb.d/reference_tables.sql:ro
+      - ./shards/shard1_schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
     command:
       - postgres
       - -c
@@ -96,13 +41,90 @@ services:
 
 
   # ==========================================
-  # SLAVE / REPLICA 1 (Port 5433)
+  # SHARD 2 PRIMARY (Node Fisik Shard 2 - Port 5436)
+  # Menampung: Reference Tables & Data Transaksi Periode Baru
+  # ==========================================
+  postgres-shard2:
+    image: postgres:17
+    container_name: postgres-shard2
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: sales
+    ports:
+      - "5436:5432"
+    volumes:
+      - shard2_data:/var/lib/postgresql/data
+      - ./shards/shard2_init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./shards/reference_tables.sql:/docker-entrypoint-initdb.d/reference_tables.sql:ro
+      - ./shards/shard2_schema.sql:/docker-entrypoint-initdb.d/02-schema.sql:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - wal_keep_size=64MB
+      - -c
+      - listen_addresses=*
+    networks:
+      - pg-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sales"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+  # ==========================================
+  # COORDINATOR NODE (Port 5432)
+  # Menampung: Skema Partisi orders & payments via postgres_fdw
+  # ==========================================
+  postgres-primary:
+    image: postgres:17
+    container_name: postgres-primary
+    restart: unless-stopped
+    depends_on:
+      postgres-shard1:
+        condition: service_healthy
+      postgres-shard2:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: sales
+    ports:
+      - "5432:5432"
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+      - ./primary/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./db.sql:/docker-entrypoint-initdb.d/02-db.sql:ro
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+    networks:
+      - pg-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sales"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+  # ==========================================
+  # STANDBY 1 - REPLIKA STREAMING SHARD 1 (Port 5433)
+  # Menampung: Salinan Replikasi Shard 1 secara Real-Time
   # ==========================================
   init-replica:
     image: postgres:17
     container_name: init-replica
     depends_on:
-      postgres-primary:
+      postgres-shard1:
         condition: service_healthy
     environment:
       PGPASSWORD: replica123
@@ -118,10 +140,10 @@ services:
         set -e
         chown -R postgres:postgres /var/lib/postgresql/data
         if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
-          echo "Membuat PostgreSQL Standby 1..."
+          echo "Membuat PostgreSQL Standby 1 (Replika Streaming Shard 1)..."
           rm -rf /var/lib/postgresql/data/*
           gosu postgres pg_basebackup \
-            -h postgres-primary \
+            -h postgres-shard1 \
             -U replicator \
             -D /var/lib/postgresql/data \
             -Fp \
@@ -146,16 +168,22 @@ services:
       - replica_data:/var/lib/postgresql/data
     networks:
       - pg-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sales"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 
   # ==========================================
-  # SLAVE / REPLICA 2 (Port 5434)
+  # STANDBY 2 - REPLIKA STREAMING SHARD 2 (Port 5434)
+  # Menampung: Salinan Replikasi Shard 2 secara Real-Time
   # ==========================================
   init-replica-2:
     image: postgres:17
     container_name: init-replica-2
     depends_on:
-      postgres-primary:
+      postgres-shard2:
         condition: service_healthy
     environment:
       PGPASSWORD: replica123
@@ -171,10 +199,10 @@ services:
         set -e
         chown -R postgres:postgres /var/lib/postgresql/data
         if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
-          echo "Membuat PostgreSQL Standby 2..."
+          echo "Membuat PostgreSQL Standby 2 (Replika Streaming Shard 2)..."
           rm -rf /var/lib/postgresql/data/*
           gosu postgres pg_basebackup \
-            -h postgres-primary \
+            -h postgres-shard2 \
             -U replicator \
             -D /var/lib/postgresql/data \
             -Fp \
@@ -199,23 +227,31 @@ services:
       - replica2_data:/var/lib/postgresql/data
     networks:
       - pg-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sales"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 
   # ==========================================
-  # 3. AUTO FAILOVER MANAGER
+  # AUTO FAILOVER MANAGER (Watchdog Shard 1)
   # ==========================================
   failover-manager:
     image: postgres:17
     container_name: failover-manager
     restart: unless-stopped
     depends_on:
+      postgres-shard1:
+        condition: service_healthy
       postgres-primary:
         condition: service_healthy
       postgres-standby:
-        condition: service_started
+        condition: service_healthy
     environment:
-      PRIMARY_HOST: postgres-primary
-      STANDBY_HOST: postgres-standby
+      PRIMARY_SHARD: postgres-shard1
+      STANDBY_SHARD: postgres-standby
+      COORDINATOR_HOST: postgres-primary
       POSTGRES_DB: sales
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres123
@@ -227,7 +263,7 @@ services:
 
 
   # ==========================================
-  # 4. HAPROXY LOAD BALANCER & ROUTING
+  # HAPROXY LOAD BALANCER & ROUTING
   # ==========================================
   haproxy:
     image: haproxy:2.8-alpine
@@ -238,7 +274,7 @@ services:
       - postgres-standby
       - postgres-standby-2
     ports:
-      - "5000:5000"   # Port Routing WRITE (ke Primary, failover ke Standby 1)
+      - "5000:5000"   # Port Routing WRITE & COORDINATOR
       - "5001:5001"   # Port Routing READ (Load Balancing Standby 1 & 2)
       - "7000:7000"   # Web Dashboard HAProxy Stats
     volumes:
